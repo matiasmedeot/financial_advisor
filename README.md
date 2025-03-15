@@ -1,2 +1,2 @@
 # financial_advisor
-Financial Asvidor App
+Financial Advidor App
