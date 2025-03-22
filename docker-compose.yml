@@ -1,47 +1,145 @@
-version: '3.8'
-
 services:
-  financial-advisor-app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: financial-advisor-app
-    ports:
-      - "8080:4000"
-    environment:
-      - NODE_ENV=development
-      - PORT=4000
-    volumes:
-      - ./src:/app/src
-      - ./public:/app/public
-    restart: unless-stopped
-    depends_on:
-      - umami
 
-  umami:
-    image: ghcr.io/umami-software/umami:postgresql-latest
-    container_name: umami
+#-----------------------------------------------Backend Layer---------------------------------------------------
+  api:
+    build: ./backend
     ports:
-      - "3001:3000"
-    environment:
-      DATABASE_URL: postgresql://umami:umami@umami-db:5432/umami
-      DATABASE_TYPE: postgresql
-      HASH_SALT: ${HASH_SALT:-replace-me-with-a-random-string}
-      NODE_ENV: production
+      - "8000:8000"
     depends_on:
-      - umami-db
-    restart: unless-stopped
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/financial_advisor
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_SERVICE_NAME=financial.advisor.api
+  
 
-  umami-db:
+  db:
     image: postgres:15-alpine
-    container_name: umami-db
     environment:
-      POSTGRES_DB: umami
-      POSTGRES_USER: umami
-      POSTGRES_PASSWORD: umami
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=financial_advisor
+    ports:
+      - "5432:5432"
     volumes:
-      - umami-db-data:/var/lib/postgresql/data
-    restart: unless-stopped
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
+#-----------------------------------------------Frontend Layer---------------------------------------------------
+  nextjs-app: 
+    build: ./frontend
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_MATOMO_URL=http://matomo:8080
+      - NEXT_PUBLIC_MATOMO_SITE_ID=1
+    restart: unless-stopped
+    # Opcional: Agregar volúmenes si necesitas persistencia de datos
+    # volumes:
+    #  - ./data:/app/data      
+
+
+#-----------------------------------------------Observability Layer---------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command:
+      - "--config=/conf/config.yaml"
+    volumes:
+      - ./tools_configs/otel-collector-config.yaml:/conf/config.yaml
+    ports:
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP http receiver
+      - "8889:8889" # Prometheus metrics exporter
+    restart: on-failure
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    command: [ "--target=all", "--storage.trace.backend=local", "--storage.trace.local.path=/var/tempo", "--auth.enabled=false" ]
+    ports:
+      - "14250:14250"
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./tools_configs/prometheus.yml:/workspace/prometheus.yml
+    command:
+      - --config.file=/workspace/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./tools_configs/datasources/:/etc/grafana/provisioning/datasources
+      - ./tools_configs/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
+      - ./tools_configs/dashboards:/etc/grafana/dashboards
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_FEATURE_TOGGLES_ENABLE: "timeSeriesTable"    #  - ./data:/app/data
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+
+#-----------------------------------------------Analytics Layer (matomo/umami)-----------------------------------------------
+#  matomo:
+#    image: matomo:latest
+#    container_name: matomo_analytics
+#    restart: unless-stopped
+#    ports:
+#      - "8080:80"
+#    environment:
+#      - MATOMO_DATABASE_HOST=mariadb
+#      - MATOMO_DATABASE_ADAPTER=mysql
+#      - MATOMO_DATABASE_TABLES_PREFIX=matomo_
+#      - MATOMO_DATABASE_USERNAME=matomo
+#      - MATOMO_DATABASE_PASSWORD=matomo_password
+#      - MATOMO_DATABASE_DBNAME=matomo
+#      # Configuración adicional para resolver el problema
+#      - PHP_MEMORY_LIMIT=256M
+#      - MATOMO_ENABLE_FORCE_SSL=0
+#    volumes:
+#      - matomo_data:/var/www/html
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:80"]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 3
+#      start_period: 40s
+#    depends_on:
+#      - mariadb
+
+#  mariadb:
+#    image: mariadb:10.6
+#    restart: unless-stopped
+#    environment:
+#      - MYSQL_ROOT_PASSWORD=root_password
+#      - MYSQL_DATABASE=matomo
+#      - MYSQL_USER=matomo
+#      - MYSQL_PASSWORD=matomo_password
+#    volumes:
+#      - mariadb:/var/lib/mysql
+#    command: --max-allowed-packet=64MB
+
+#Agregar servicio de Feature Flags an A/B Testing (growthbook)
+ 
 volumes:
-  umami-db-data:
+  postgres_data:
+#  matomo:
+#  mariadb:
+#  matomo_data:
